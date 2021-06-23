@@ -16,12 +16,12 @@ function field = resize_z(field_name, field, Nz_new, varargin)
 %    'Nz_new'       - number of points to change to
 %   Optional arguments:
 %    'opts'         - a structure holding simulation parameters
-%                   - these are: type_z and Lz
+%                   - these are: type_z and Lz, Ly, Lx
 %
 %  Outputs:
 %    'field'        - the resized field
 %
-%  David Deepwell, 2018
+%  David Deepwell, 2018, Adapted for cheb grids by Andrew Grace, 2021
 
 % get number of points in each dimension
 sz     = size(field);
@@ -38,19 +38,22 @@ if nargin == 3
     params = spins_params();
     type_z = params.type_z;
     Lz     = params.Lz;
+    Ly     = params.Ly;
+    Lx     = params.Lx;    
 elseif nargin == 4
     % read from optional input argument
     opts = varargin{1};
     type_z = opts.type_z;
     Lz     = opts.Lz;
+    Ly     = opts.Ly;
+    Lx     = opts.Lx;     
 else
     error('Incorrect number of input arguments. 3 or 4 are expected.')
 end
-dz_old = Lz/Nz_old;
 
-% error check expansion type
-if ~strcmp(type_z, 'FREE_SLIP') && ~strcmp(type_z, 'FOURIER')
-    error('z boundary condition is not FREE_SLIP or FOURIER.')
+
+if strcmp(type_z, 'FREE_SLIP') || strcmp(type_z, 'FOURIER')
+    dz_old = Lz/Nz_old;
 end
 
 % check sizes
@@ -61,48 +64,155 @@ else
     increase_points = false;
 end
 
-% reshape 2D to match the shape of a 3D field
-if Ny == 1
-    field = reshape(field, [Nx 1 Nz_old]);
+if ~strcmp(type_z,'NO_SLIP')
+    
+    % reshape 2D to match the shape of a 3D field
+    if Ny == 1
+        field = reshape(field, [Nx 1 Nz_old]);
+    end
+
+    % permute to put extending dimension in the first dimension
+    field = permute(field, [3 2 1]);
+
+    % extension types
+    odd_ext    = @(f) [f; -flipud(f)];
+    even_ext   = @(f) [f;  flipud(f)];
+    period_ext = @(f) [f;  f];
+
+    % double the field
+    if strcmp(type_z, 'FOURIER')
+        field = period_ext(field);
+    elseif strcmp(field_name, 'w')
+        field = odd_ext(field);
+    else
+        field = even_ext(field);
+    end
+
+    % phase shift because grid is cell-centered, and take fft
+    dz_new = Lz/Nz_new;
+    kzs = fftfreq(2*Nz_old, dz_old);
+    phase_corr = exp(-1i*kzs*(dz_old/2-dz_new/2)).';
+    field = bsxfun(@times, fft(field), phase_corr);
+
+    % pad or truncate
+    if increase_points
+        % pad with zeros
+        field = [field(1:Nz_old,:,:); zeros(2*Nz_new-2*Nz_old,Ny,Nx); field(end-Nz_old+1:end,:,:)];
+    else
+        % truncate high frequencies
+        field = [field(1:Nz_new,:,:); field(end-Nz_new+1:end,:,:)];
+    end
+
+    % take ifft
+    field = mult*real(ifft(field));
+    field = field(1:Nz_new,:,:);
+    % permute back
+    field = permute(field, [3 2 1]);
+    % return field to 2D if it was
+    if Ny == 1
+        field = reshape(field,[Nx Nz_new]);
+    end
+else 
+ 
+     %BC must be NO_SLIP. 
+     %We have to generate grids in order to interpolate on CHEB grid
+     
+     if Ny~=1
+         x_old = generate_xgrid([Lx Ly Lz],[Nx Ny Nz_old],'NO_SLIP');
+         y_old = generate_ygrid([Lx Ly Lz],[Nx Ny Nz_old],'NO_SLIP');
+         z_old = generate_zgrid([Lx Ly Lz],[Nx Ny Nz_old],'NO_SLIP');
+
+         x_new = generate_xgrid([Lx Ly Lz],[Nx Ny Nz_new],'NO_SLIP');
+         y_new = generate_ygrid([Lx Ly Lz],[Nx Ny Nz_new],'NO_SLIP');
+         z_new = generate_zgrid([Lx Ly Lz],[Nx Ny Nz_new],'NO_SLIP');
+         
+         %generate_xgrid etc give grids back for use with SPINS data, must
+         %permute for use with interp      
+         x_old = permute(x_old,[2 1 3]);
+         y_old = permute(y_old,[2 1 3]);
+         z_old = permute(z_old,[2 1 3]);
+         
+         x_new = permute(x_new,[2 1 3]);
+         y_new = permute(y_new,[2 1 3]);
+         z_new = permute(z_new,[2 1 3]);
+         
+         field = permute(field,[2 1 3]);
+
+         %Do interpolation
+         field = interp3(x_old,y_old,z_old,field,x_new,y_new,z_new);
+         %Permute back
+         field = permute(field, [2 1 3]);
+         %clear grids
+         clear x_old y_old z_old x_new y_new z_new;
+     else
+         x_old = generate_xgrid([Lx Lz],[Nx_old Nz_old],'NO_SLIP');
+         z_old = generate_zgrid([Lx Lz],[Nx_old Nz_old],'NO_SLIP');
+
+         x_new = generate_xgrid([Lx Lz],[Nx_new Nz_new],'NO_SLIP');
+         z_new = generate_zgrid([Lx Lz],[Nx_new Nz_new],'NO_SLIP');
+         
+         %generate_xgrid etc give grids back for use with SPINS data, must
+         %permute for use with interp      
+         x_old = permute(x_old,[2 1 3]);
+         z_old = permute(z_old,[2 1 3]);
+         
+         x_new = permute(x_new,[2 1 3]);
+         z_new = permute(z_new,[2 1 3]);
+
+         %Interpolate and transpose
+         field = (interp2(x_old,z_old,field',x_new,z_new))';
+         %Clear grids
+         clear x_old z_old x_new z_new;
+
+     end
+     
+     
+%     
+%     %Make new Cheb grid
+%     [~,z1d_new] = cheb(Nz_new-1);
+%     
+%     %Make old Cheb grid
+%     [~,z1d_old] = cheb(Nz_old-1);
+%     
+%     %Move to physical space
+%     z1d_old = Lz/2*(1 + z1d_old);
+%     z1d_new = Lz/2*(1 + z1d_new);
+%     
+%     %If data is 3D, we must use interp3
+%     if Ny ~= 1
+%         dx = Lx/Nx;
+%         dy = Ly/Ny;
+%         field = permute(field, [2 1 3]); %Permute so data agrees with meshgrid
+%         %Make old grid
+%         [x_old,y_old,z_old] = meshgrid(linspace(dx/2,Lx - dx/2,Nx),...
+%             linspace(dy/2,Ly - dy/2,Ny),z1d_old);   
+%         %Make new grid
+%         [x_new,y_new,z_new] = meshgrid(linspace(dx/2,Lx - dx/2,Nx),...
+%             linspace(dy/2,Ly - dy/2,Ny),z1d_new); 
+%         %Do interpolation
+%         field = interp3(x_old,y_old,z_old,field,x_new,y_new,z_new);
+%         %Permute back
+%         field = permute(field, [2 1 3]);
+%         %clear grids
+%         clear x_old y_old z_old x_new y_new z_new;
+%     else
+%         dx = Lx/Nx;
+%         %field = reshape(field, [Nx Nz_old]);
+%         %Make old grid
+%         [x_old,z_old] = meshgrid(linspace(dx/2,Lx - dx/2,Nx),...
+%             z1d_old); 
+%         %Make new grid
+%         [x_new,z_new] = meshgrid(linspace(dx/2,Lx - dx/2,Nx),...
+%             z1d_new); 
+%         %Interpolate and transpose
+%         field = (interp2(x_old,z_old,field',x_new,z_new))';
+%         %Clear grids
+%         clear x_old z_old x_new z_new;
+%         
+%     end
+
 end
-% permute to put extending dimension in the first dimension
-field = permute(field, [3 2 1]);
+%
+%End Function
 
-% extension types
-odd_ext    = @(f) [f; -flipud(f)];
-even_ext   = @(f) [f;  flipud(f)];
-period_ext = @(f) [f;  f];
-
-% double the field
-if strcmp(type_z, 'FOURIER')
-    field = period_ext(field);
-elseif strcmp(field_name, 'w')
-    field = odd_ext(field);
-else
-    field = even_ext(field);
-end
-
-% phase shift because grid is cell-centered, and take fft
-dz_new = Lz/Nz_new;
-kzs = fftfreq(2*Nz_old, dz_old);
-phase_corr = exp(-1i*kzs*(dz_old/2-dz_new/2)).';
-field = bsxfun(@times, fft(field), phase_corr);
-
-% pad or truncate
-if increase_points
-    % pad with zeros
-    field = [field(1:Nz_old,:,:); zeros(2*Nz_new-2*Nz_old,Ny,Nx); field(end-Nz_old+1:end,:,:)];
-else
-    % truncate high frequencies
-    field = [field(1:Nz_new,:,:); field(end-Nz_new+1:end,:,:)];
-end
-
-% take ifft
-field = mult*real(ifft(field));
-field = field(1:Nz_new,:,:);
-% permute back
-field = permute(field, [3 2 1]);
-% return field to 2D if it was
-if Ny == 1
-    field = reshape(field,[Nx Nz_new]);
 end
